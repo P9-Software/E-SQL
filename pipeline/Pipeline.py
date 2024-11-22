@@ -1,289 +1,38 @@
 import os
-import json
 from utils.prompt_utils import *
 from utils.db_utils import * 
-from utils.openai_utils import create_response
-from typing import Dict, List
+from utils.pipeline_utils import create_response
+from typing import Dict
 
 class Pipeline():
-    def __init__(self, args):
-        # Running mode attributes
-        self.mode = args.mode 
-        self.dataset_path = args.dataset_path
+    def __init__(self, transformers_pipe, db_path):
+
+        # Question Enrichment Arguments
+        self.enrichment_level = "complex"
+        self.elsn = 3
+        self.efsse = False
+
+        # Schema Filtering Arguments
+        self.flsn = 3
+        self.ffsse = False
+
+        # SQL Generation Arguments
+        self.cfg = True
+        self.glsn = 3
+        self.gfsse = False
+
+        # Database Sample Arguments
+        self.db_sample_limit = 5
+        self.db_path = db_path
+
+        # Relevant Description Arguments
+        self.rdn = 6
+
+        # Miscellaneous Arguments
+        self.seed = 42
 
         # Pipeline attribute
-        self.pipeline_order = args.pipeline_order
-
-        # Model attributes
-        self.model = args.model
-        self.temperature = args.temperature
-        self.top_p = args.top_p
-        self.max_tokens = args.max_tokens
-        self.n = args.n
-
-        # Stages (enrichment, filtering, generation) attributes
-        self.enrichment_level = args.enrichment_level
-        self.elsn = args.enrichment_level_shot_number
-        self.efsse = args.enrichment_few_shot_schema_existance
-
-        self.flsn = args.filtering_level_shot_number
-        self.ffsse = args.filtering_few_shot_schema_existance
-
-        self.cfg = args.cfg
-        self.glsn = args.generation_level_shot_number
-        self.gfsse = args.generation_few_shot_schema_existance
-
-        self.db_sample_limit = args.db_sample_limit
-        self.rdn = args.relevant_description_number
-
-        self.seed = args.seed
-
-    def convert_message_content_to_dict(self, response_object: Dict) -> Dict:
-        """
-        The function gets a LLM response object, and then it converts the content of it to the Python object.
-
-        Arguments:
-            response_object (Dict): LLM response object
-        Returns:
-            response_object (Dict): Response object whose content changed to dictionary
-        """
-
-        response_object.choices[0].message.content = json.loads(response_object.choices[0].message.content)
-        return response_object
-    
-
-    def forward_pipeline_CSG_SR(self, t2s_object: Dict) -> Dict[str, str]:
-        """
-        The function runs Candidate SQL Generation(CSG) and SQL Refinement(SR) modules respectively without any question enrichment or filtering stages.
-
-        Arguments:
-            t2s_object (Dict): Python dictionary that stores information about a question like q_id, db_id, question, evidence etc. 
-        Returns:
-            t2s_object_prediction (Dict):  Python dictionary that stores information about a question like q_id, db_id, question, evidence etc and also stores information after each stage
-        """
-        db_id = t2s_object["db_id"]
-        q_id = t2s_object["question_id"]
-        evidence = t2s_object["evidence"]
-        question = t2s_object["question"]
-        
-        bird_sql_path = os.getenv('BIRD_DB_PATH')
-        db_path = bird_sql_path + f"/{self.mode}/{self.mode}_databases/{db_id}/{db_id}.sqlite"
-        db_description_path = bird_sql_path + f"/{self.mode}/{self.mode}_databases/{db_id}/database_description"
-        db_descriptions = question_relevant_descriptions_prep(database_description_path=db_description_path, question=question, relevant_description_number=self.rdn)
-        database_column_meaning_path = bird_sql_path + f"/{self.mode}/column_meaning.json"
-        db_column_meanings = db_column_meaning_prep(database_column_meaning_path, db_id)
-        db_descriptions = db_descriptions + "\n\n" + db_column_meanings
-
-        # extracting original schema dictionary 
-        original_schema_dict = get_schema_tables_and_columns_dict(db_path=db_path)
-
-        t2s_object["question_enrichment"] = "No Question Enrichment"
-
-        ### STAGE 1: Candidate SQL GENERATION
-        # -- Original question is used
-        # -- Original Schema is used 
-        sql_generation_response_obj =  self.candidate_sql_generation_module(db_path=db_path, db_id=db_id, question=question, evidence=evidence, filtered_schema_dict=original_schema_dict, db_descriptions=db_descriptions)
-        try:
-            possible_sql = sql_generation_response_obj.choices[0].message.content['SQL']
-            t2s_object["candidate_sql_generation"] = {
-                "sql_generation_reasoning": sql_generation_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
-                "possible_sql": possible_sql,
-                "exec_err": "",
-                "prompt_tokens": sql_generation_response_obj.usage.prompt_tokens,
-                "completion_tokens": sql_generation_response_obj.usage.completion_tokens,
-                "total_tokens": sql_generation_response_obj.usage.total_tokens,
-            }
-            t2s_object["possible_sql"] = possible_sql
-            # execute SQL
-            try:
-                possible_respose = func_timeout(30, execute_sql, args=(db_path, possible_sql))
-            except FunctionTimedOut:
-                t2s_object['candidate_sql_generation']["exec_err"] = "timeout"
-            except Exception as e:
-                t2s_object['candidate_sql_generation']["exec_err"] = str(e)
-        except Exception as e:
-            logging.error(f"Error in reaching content from sql generation response for question_id {q_id}: {e}")
-            t2s_object["candidate_sql_generation"] = {
-                "sql_generation_reasoning": "",
-                "possible_sql": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            }
-            t2s_object["candidate_sql_generation"]["error"] = f"{e}"
-            return t2s_object
-        
-        ### STAGE 2: SQL Refinement
-        # -- Original question is used
-        # -- Original Schema is used 
-        # -- Possible SQL is used
-        # -- Possible Conditions is extracted from possible SQL and then used for augmentation
-        # -- Execution Error for Possible SQL is used
-        exec_err = t2s_object['candidate_sql_generation']["exec_err"]
-        sql_generation_response_obj =  self.sql_refinement_module(db_path=db_path, db_id=db_id, question=question, evidence=evidence, possible_sql=possible_sql, exec_err=exec_err, filtered_schema_dict=original_schema_dict, db_descriptions=db_descriptions)
-        try:
-            predicted_sql = sql_generation_response_obj.choices[0].message.content['SQL']
-            t2s_object["sql_refinement"] = {
-                "sql_generation_reasoning": sql_generation_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
-                "predicted_sql": predicted_sql,
-                "prompt_tokens": sql_generation_response_obj.usage.prompt_tokens,
-                "completion_tokens": sql_generation_response_obj.usage.completion_tokens,
-                "total_tokens": sql_generation_response_obj.usage.total_tokens,
-            }
-            t2s_object["predicted_sql"] = predicted_sql
-        except Exception as e:
-            logging.error(f"Error in reaching content from sql generation response for question_id {q_id}: {e}")
-            t2s_object["sql_refinement"] = {
-                "sql_generation_reasoning": "",
-                "predicted_sql": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            }
-            t2s_object["sql_refinement"]["error"] = f"{e}"
-            return t2s_object
-
-        # storing the usage for one question
-        t2s_object["total_usage"] = {
-            "prompt_tokens": t2s_object['candidate_sql_generation']['prompt_tokens'] + t2s_object['sql_refinement']['prompt_tokens'],
-            "completion_tokens": t2s_object['candidate_sql_generation']['completion_tokens'] + t2s_object['sql_refinement']['completion_tokens'],
-            "total_tokens": t2s_object['candidate_sql_generation']['total_tokens'] + t2s_object['sql_refinement']['total_tokens']
-        }
-
-        t2s_object_prediction = t2s_object
-        return t2s_object_prediction
-    
-    def forward_pipeline_CSG_QE_SR(self, t2s_object: Dict) -> Dict:
-        """
-        The function performs Candidate SQL Generation(CSG), Quesiton Enrichment(QE) and SQL Refinement(SR) modules respectively without filtering stages.
-        
-        Arguments:
-            t2s_object (Dict): Python dictionary that stores information about a question like q_id, db_id, question, evidence etc. 
-        Returns:
-            t2s_object_prediction (Dict):  Python dictionary that stores information about a question like q_id, db_id, question, evidence etc and also stores information after each stage
-        """
-        db_id = t2s_object["db_id"]
-        q_id = t2s_object["question_id"]
-        evidence = t2s_object["evidence"]
-        question = t2s_object["question"]
-        
-        bird_sql_path = os.getenv('BIRD_DB_PATH')
-        db_path = bird_sql_path + f"/{self.mode}/{self.mode}_databases/{db_id}/{db_id}.sqlite"
-        db_description_path = bird_sql_path + f"/{self.mode}/{self.mode}_databases/{db_id}/database_description"
-        db_descriptions = question_relevant_descriptions_prep(database_description_path=db_description_path, question=question, relevant_description_number=self.rdn)
-        database_column_meaning_path = bird_sql_path + f"/{self.mode}/column_meaning.json"
-        db_column_meanings = db_column_meaning_prep(database_column_meaning_path, db_id)
-        db_descriptions = db_descriptions + "\n\n" + db_column_meanings
-
-        # extracting original schema dictionary 
-        original_schema_dict = get_schema_tables_and_columns_dict(db_path=db_path)
-
-        ### STAGE 1: Candidate SQL GENERATION
-        # -- Original question is used
-        # -- Original Schema is used 
-        sql_generation_response_obj =  self.candidate_sql_generation_module(db_path=db_path, db_id=db_id, question=question, evidence=evidence, filtered_schema_dict=original_schema_dict, db_descriptions=db_descriptions)
-        try:
-            possible_sql = sql_generation_response_obj.choices[0].message.content['SQL']
-            t2s_object["candidate_sql_generation"] = {
-                "sql_generation_reasoning": sql_generation_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
-                "possible_sql": possible_sql,
-                "exec_err": "",
-                "prompt_tokens": sql_generation_response_obj.usage.prompt_tokens,
-                "completion_tokens": sql_generation_response_obj.usage.completion_tokens,
-                "total_tokens": sql_generation_response_obj.usage.total_tokens,
-            }
-            t2s_object["possible_sql"] = possible_sql
-            # execute SQL
-            try:
-                possible_respose = func_timeout(30, execute_sql, args=(db_path, possible_sql))
-            except FunctionTimedOut:
-                t2s_object['candidate_sql_generation']["exec_err"] = "timeout"
-            except Exception as e:
-                t2s_object['candidate_sql_generation']["exec_err"] = str(e)
-        except Exception as e:
-            logging.error(f"Error in reaching content from sql generation response for question_id {q_id}: {e}")
-            t2s_object["candidate_sql_generation"] = {
-                "sql_generation_reasoning": "",
-                "possible_sql": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            }
-            t2s_object["candidate_sql_generation"]["error"] = f"{e}"
-            return t2s_object
-        
-        # Extract possible conditions dict list
-        possible_conditions_dict_list = collect_possible_conditions(db_path=db_path, sql=possible_sql)
-        possible_conditions = sql_possible_conditions_prep(possible_conditions_dict_list=possible_conditions_dict_list)
-
-        ### STAGE 2: Question Enrichment:
-        # -- Original question is used
-        # -- Original schema is used
-        # -- Possible conditions are used
-        q_enrich_response_obj = self.question_enrichment_module(db_path=db_path, q_id=q_id, db_id=db_id, question=question, evidence=evidence, possible_conditions=possible_conditions, schema_dict=original_schema_dict, db_descriptions=db_descriptions)
-        try:
-            enriched_question = q_enrich_response_obj.choices[0].message.content['enriched_question']
-            enrichment_reasoning = q_enrich_response_obj.choices[0].message.content['chain_of_thought_reasoning']
-            t2s_object["question_enrichment"] = {
-                "enrichment_reasoning": q_enrich_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
-                "enriched_question": q_enrich_response_obj.choices[0].message.content['enriched_question'],
-                "prompt_tokens": q_enrich_response_obj.usage.prompt_tokens,
-                "completion_tokens": q_enrich_response_obj.usage.completion_tokens,
-                "total_tokens": q_enrich_response_obj.usage.total_tokens,
-            }
-            enriched_question = question + enrichment_reasoning + enriched_question # This is added after experiment-24
-        except Exception as e:
-            logging.error(f"Error in reaching content from question enrichment response for question_id {q_id}: {e}")
-            t2s_object["question_enrichment"] = {
-                "enrichment_reasoning": "",
-                "enriched_question": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            }
-            t2s_object["question_enrichment"]["error"] = f"{e}"
-            enriched_question = question
-        
-        ### STAGE 3: SQL Refinement
-        # -- Enriched question is used
-        # -- Original Schema is used 
-        # -- Possible SQL is used
-        # -- Possible Conditions is extracted from possible SQL and then used for augmentation
-        # -- Execution Error for Possible SQL is used
-        exec_err = t2s_object['candidate_sql_generation']["exec_err"]
-        sql_generation_response_obj =  self.sql_refinement_module(db_path=db_path, db_id=db_id, question=enriched_question, evidence=evidence, possible_sql=possible_sql, exec_err=exec_err, filtered_schema_dict=original_schema_dict, db_descriptions=db_descriptions)
-        try:
-            predicted_sql = sql_generation_response_obj.choices[0].message.content['SQL']
-            t2s_object["sql_refinement"] = {
-                "sql_generation_reasoning": sql_generation_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
-                "predicted_sql": predicted_sql,
-                "prompt_tokens": sql_generation_response_obj.usage.prompt_tokens,
-                "completion_tokens": sql_generation_response_obj.usage.completion_tokens,
-                "total_tokens": sql_generation_response_obj.usage.total_tokens,
-            }
-            t2s_object["predicted_sql"] = predicted_sql
-        except Exception as e:
-            logging.error(f"Error in reaching content from sql generation response for question_id {q_id}: {e}")
-            t2s_object["sql_refinement"] = {
-                "sql_generation_reasoning": "",
-                "predicted_sql": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-            }
-            t2s_object["sql_refinement"]["error"] = f"{e}"
-            return t2s_object
-
-        # storing the usage for one question
-        t2s_object["total_usage"] = {
-            "prompt_tokens": t2s_object['candidate_sql_generation']['prompt_tokens'] + t2s_object['question_enrichment']['prompt_tokens'] + t2s_object['sql_refinement']['prompt_tokens'],
-            "completion_tokens": t2s_object['candidate_sql_generation']['completion_tokens'] + t2s_object['question_enrichment']['completion_tokens'] + t2s_object['sql_refinement']['completion_tokens'],
-            "total_tokens": t2s_object['candidate_sql_generation']['total_tokens'] + t2s_object['question_enrichment']['total_tokens'] + t2s_object['sql_refinement']['total_tokens']
-        }
-
-        t2s_object_prediction = t2s_object
-        return t2s_object_prediction
-    
+        self.transformers_pipe = transformers_pipe
 
     def forward_pipeline_SF_CSG_QE_SR(self, t2s_object: Dict) -> Dict:
         """
@@ -299,30 +48,23 @@ class Pipeline():
         evidence = t2s_object["evidence"]
         question = t2s_object["question"]
         
-        bird_sql_path = os.getenv('BIRD_DB_PATH')
-        db_path = bird_sql_path + f"/{self.mode}/{self.mode}_databases/{db_id}/{db_id}.sqlite"
-        db_description_path = bird_sql_path + f"/{self.mode}/{self.mode}_databases/{db_id}/database_description"
-        db_descriptions = question_relevant_descriptions_prep(database_description_path=db_description_path, question=question, relevant_description_number=self.rdn)
-        database_column_meaning_path = bird_sql_path + f"/{self.mode}/column_meaning.json"
+        database_column_meaning_path = os.path.join(os.path.dirname("self.db_path"), "column_descriptions.json")
         db_column_meanings = db_column_meaning_prep(database_column_meaning_path, db_id)
         db_descriptions = db_descriptions + "\n\n" + db_column_meanings
 
         # extracting original schema dictionary 
-        original_schema_dict = get_schema_tables_and_columns_dict(db_path=db_path)
+        original_schema_dict = get_schema_tables_and_columns_dict(db_path=self.db_path)
 
 
         ### STAGE 1: FILTERING THE DATABASE SCHEMA
         # -- original question is used.
         # -- Original Schema is used.
-        schema_filtering_response_obj = self.schema_filtering_module(db_path=db_path, db_id=db_id, question=question, evidence=evidence, schema_dict=original_schema_dict, db_descriptions=db_descriptions)
+        schema_filtering_response_obj = self.schema_filtering_module(db_path=self.db_path, db_id=db_id, question=question, evidence=evidence, schema_dict=original_schema_dict, db_descriptions=db_descriptions)
         # print("schema_filtering_response_obj: \n", schema_filtering_response_obj)
         try:
             t2s_object["schema_filtering"] = {
                 "filtering_reasoning": schema_filtering_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
                 "filtered_schema_dict": schema_filtering_response_obj.choices[0].message.content['tables_and_columns'],
-                "prompt_tokens": schema_filtering_response_obj.usage.prompt_tokens,
-                "completion_tokens": schema_filtering_response_obj.usage.completion_tokens,
-                "total_tokens": schema_filtering_response_obj.usage.total_tokens,
             }
         except Exception as e:
             logging.error(f"Error in reaching content from schema filtering response for question_id {q_id}: {e}")
@@ -331,33 +73,30 @@ class Pipeline():
 
         ### STAGE 1.1: FILTERED SCHEMA CORRECTION
         filtered_schema_dict = schema_filtering_response_obj.choices[0].message.content['tables_and_columns']
-        filtered_schema_dict, filtered_schema_problems = filtered_schema_correction(db_path=db_path, filtered_schema_dict=filtered_schema_dict) 
+        filtered_schema_dict, filtered_schema_problems = filtered_schema_correction(db_path=self.db_path, filtered_schema_dict=filtered_schema_dict) 
         t2s_object["schema_filtering_correction"] = {
             "filtered_schema_problems": filtered_schema_problems,
             "final_filtered_schema_dict": filtered_schema_dict
         }
 
-        schema_statement = generate_schema_from_schema_dict(db_path=db_path, schema_dict=filtered_schema_dict)
+        schema_statement = generate_schema_from_schema_dict(db_path=self.db_path, schema_dict=filtered_schema_dict)
         t2s_object["create_table_statement"] = schema_statement
 
         ### STAGE 2: Candidate SQL GENERATION
         # -- Original question is used
         # -- Filtered Schema is used 
-        sql_generation_response_obj =  self.candidate_sql_generation_module(db_path=db_path, db_id=db_id, question=question, evidence=evidence, filtered_schema_dict=filtered_schema_dict, db_descriptions=db_descriptions)
+        sql_generation_response_obj =  self.candidate_sql_generation_module(db_path=self.db_path, db_id=db_id, question=question, evidence=evidence, filtered_schema_dict=filtered_schema_dict, db_descriptions=db_descriptions)
         try:
             possible_sql = sql_generation_response_obj.choices[0].message.content['SQL']
             t2s_object["candidate_sql_generation"] = {
                 "sql_generation_reasoning": sql_generation_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
                 "possible_sql": possible_sql,
                 "exec_err": "",
-                "prompt_tokens": sql_generation_response_obj.usage.prompt_tokens,
-                "completion_tokens": sql_generation_response_obj.usage.completion_tokens,
-                "total_tokens": sql_generation_response_obj.usage.total_tokens,
             }
             t2s_object["possible_sql"] = possible_sql
             # execute SQL
             try:
-                possible_respose = func_timeout(30, execute_sql, args=(db_path, possible_sql))
+                _ = func_timeout(30, execute_sql, args=(self.db_path, possible_sql))
             except FunctionTimedOut:
                 t2s_object['candidate_sql_generation']["exec_err"] = "timeout"
             except Exception as e:
@@ -367,31 +106,25 @@ class Pipeline():
             t2s_object["candidate_sql_generation"] = {
                 "sql_generation_reasoning": "",
                 "possible_sql": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
             }
             t2s_object["candidate_sql_generation"]["error"] = f"{e}"
             return t2s_object
         
         # Extract possible conditions dict list
-        possible_conditions_dict_list = collect_possible_conditions(db_path=db_path, sql=possible_sql)
+        possible_conditions_dict_list = collect_possible_conditions(db_path=self.db_path, sql=possible_sql)
         possible_conditions = sql_possible_conditions_prep(possible_conditions_dict_list=possible_conditions_dict_list)
 
         ### STAGE 3: Question Enrichment:
         # -- Original question is used
         # -- Original schema is used
         # -- Possible conditions are used
-        q_enrich_response_obj = self.question_enrichment_module(db_path=db_path, q_id=q_id, db_id=db_id, question=question, evidence=evidence, possible_conditions=possible_conditions, schema_dict=filtered_schema_dict, db_descriptions=db_descriptions)
+        q_enrich_response_obj = self.question_enrichment_module(db_path=self.db_path, q_id=q_id, db_id=db_id, question=question, evidence=evidence, possible_conditions=possible_conditions, schema_dict=filtered_schema_dict, db_descriptions=db_descriptions)
         try:
             enriched_question = q_enrich_response_obj.choices[0].message.content['enriched_question']
             enrichment_reasoning = q_enrich_response_obj.choices[0].message.content['chain_of_thought_reasoning']
             t2s_object["question_enrichment"] = {
                 "enrichment_reasoning": q_enrich_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
                 "enriched_question": q_enrich_response_obj.choices[0].message.content['enriched_question'],
-                "prompt_tokens": q_enrich_response_obj.usage.prompt_tokens,
-                "completion_tokens": q_enrich_response_obj.usage.completion_tokens,
-                "total_tokens": q_enrich_response_obj.usage.total_tokens,
             }
             enriched_question = question + enrichment_reasoning + enriched_question # This is added after experiment-24
         except Exception as e:
@@ -399,9 +132,6 @@ class Pipeline():
             t2s_object["question_enrichment"] = {
                 "enrichment_reasoning": "",
                 "enriched_question": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
             }
             t2s_object["question_enrichment"]["error"] = f"{e}"
             enriched_question = question
@@ -413,15 +143,12 @@ class Pipeline():
         # -- Possible Conditions is extracted from possible SQL and then used for augmentation
         # -- Execution Error for Possible SQL is used
         exec_err = t2s_object['candidate_sql_generation']["exec_err"]
-        sql_generation_response_obj =  self.sql_refinement_module(db_path=db_path, db_id=db_id, question=enriched_question, evidence=evidence, possible_sql=possible_sql, exec_err=exec_err, filtered_schema_dict=filtered_schema_dict, db_descriptions=db_descriptions)
+        sql_generation_response_obj =  self.sql_refinement_module(db_path=self.db_path, db_id=db_id, question=enriched_question, evidence=evidence, possible_sql=possible_sql, exec_err=exec_err, filtered_schema_dict=filtered_schema_dict, db_descriptions=db_descriptions)
         try:
             predicted_sql = sql_generation_response_obj.choices[0].message.content['SQL']
             t2s_object["sql_refinement"] = {
                 "sql_generation_reasoning": sql_generation_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
                 "predicted_sql": predicted_sql,
-                "prompt_tokens": sql_generation_response_obj.usage.prompt_tokens,
-                "completion_tokens": sql_generation_response_obj.usage.completion_tokens,
-                "total_tokens": sql_generation_response_obj.usage.total_tokens,
             }
             t2s_object["predicted_sql"] = predicted_sql
         except Exception as e:
@@ -429,19 +156,9 @@ class Pipeline():
             t2s_object["sql_refinement"] = {
                 "sql_generation_reasoning": "",
                 "predicted_sql": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
             }
             t2s_object["sql_refinement"]["error"] = f"{e}"
             return t2s_object
-
-        # storing the usage for one question
-        t2s_object["total_usage"] = {
-            "prompt_tokens": t2s_object['candidate_sql_generation']['prompt_tokens'] + t2s_object['question_enrichment']['prompt_tokens'] + t2s_object['sql_refinement']['prompt_tokens'],
-            "completion_tokens": t2s_object['candidate_sql_generation']['completion_tokens'] + t2s_object['question_enrichment']['completion_tokens'] + t2s_object['sql_refinement']['completion_tokens'],
-            "total_tokens": t2s_object['candidate_sql_generation']['total_tokens'] + t2s_object['question_enrichment']['total_tokens'] + t2s_object['sql_refinement']['total_tokens']
-        }
 
         t2s_object_prediction = t2s_object
         return t2s_object_prediction
@@ -493,10 +210,6 @@ class Pipeline():
         """
         prompt = self.construct_question_enrichment_prompt(db_path=db_path, q_id=q_id, db_id=db_id, question=question, evidence=evidence, possible_conditions=possible_conditions, schema_dict=schema_dict, db_descriptions=db_descriptions)
         response_object = create_response(stage="question_enrichment", prompt=prompt, model=self.model, max_tokens=self.max_tokens, temperature=self.temperature, top_p=self.top_p, n=self.n)
-        try:
-            response_object = self.convert_message_content_to_dict(response_object)
-        except:
-            return response_object
 
         return response_object
     
@@ -603,11 +316,7 @@ class Pipeline():
             response_object (Dict): Response object returned by the LLM
         """
         prompt = self.construct_candidate_sql_generation_prompt(db_path=db_path, db_id=db_id, question=question, evidence=evidence, filtered_schema_dict=filtered_schema_dict, db_descriptions=db_descriptions)
-        response_object = create_response(stage="candidate_sql_generation", prompt=prompt, model=self.model, max_tokens=self.max_tokens, temperature=self.temperature, top_p=self.top_p, n=self.n)
-        try:
-            response_object = self.convert_message_content_to_dict(response_object)
-        except:
-            return response_object
+        response_object = create_response(stage="candidate_sql_generation", prompt=prompt, pipe=self.transformers_pipe)
 
         return response_object
 
@@ -631,11 +340,7 @@ class Pipeline():
             response_object (Dict): Response object returned by the LLM
         """
         prompt = self.construct_sql_refinement_prompt(db_path=db_path, db_id=db_id, question=question, evidence=evidence, possible_sql=possible_sql, exec_err=exec_err, filtered_schema_dict=filtered_schema_dict, db_descriptions=db_descriptions)
-        response_object = create_response(stage="sql_refinement", prompt=prompt, model=self.model, max_tokens=self.max_tokens, temperature=self.temperature, top_p=self.top_p, n=self.n)
-        try:
-            response_object = self.convert_message_content_to_dict(response_object)
-        except:
-            return response_object
+        response_object = create_response(stage="sql_refinement", prompt=prompt, pipe=self.pipeline)
 
         return response_object
     
@@ -656,11 +361,7 @@ class Pipeline():
             response_object (Dict): Response object returned by the LLM
         """
         prompt = self.construct_filtering_prompt(db_path=db_path, db_id=db_id, question=question, evidence=evidence, schema_dict=schema_dict, db_descriptions=db_descriptions)
-        response_object = create_response(stage="schema_filtering", prompt=prompt, model=self.model, max_tokens=self.max_tokens, temperature=self.temperature, top_p=self.top_p, n=self.n)
-        try:
-            response_object = self.convert_message_content_to_dict(response_object)
-        except:
-            return response_object
+        response_object = create_response(stage="schema_filtering", prompt=prompt, pipe=self.pipeline)
 
         return response_object
     
