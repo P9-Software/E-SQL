@@ -8,9 +8,9 @@ class Pipeline():
     def __init__(self, transformers_pipe, db_path):
 
         # Question Enrichment Arguments
-        self.enenrichment_level = "complex"
+        self.enrichment_level = "complex"
         self.elsn = 3
-        self.effse = False
+        self.efsse = False
 
         # Schema Filtering Arguments
         self.flsn = 3
@@ -48,8 +48,7 @@ class Pipeline():
         evidence = t2s_object["evidence"]
         question = t2s_object["question"]
         
-        # TODO: Extract column meanings
-        database_column_meaning_path = bird_sql_path + f"/{self.mode}/column_meaning.json"
+        database_column_meaning_path = os.path.join(os.path.dirname("self.db_path"), "column_descriptions.json")
         db_column_meanings = db_column_meaning_prep(database_column_meaning_path, db_id)
         db_descriptions = db_descriptions + "\n\n" + db_column_meanings
 
@@ -66,9 +65,6 @@ class Pipeline():
             t2s_object["schema_filtering"] = {
                 "filtering_reasoning": schema_filtering_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
                 "filtered_schema_dict": schema_filtering_response_obj.choices[0].message.content['tables_and_columns'],
-                "prompt_tokens": schema_filtering_response_obj.usage.prompt_tokens,
-                "completion_tokens": schema_filtering_response_obj.usage.completion_tokens,
-                "total_tokens": schema_filtering_response_obj.usage.total_tokens,
             }
         except Exception as e:
             logging.error(f"Error in reaching content from schema filtering response for question_id {q_id}: {e}")
@@ -96,9 +92,6 @@ class Pipeline():
                 "sql_generation_reasoning": sql_generation_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
                 "possible_sql": possible_sql,
                 "exec_err": "",
-                "prompt_tokens": sql_generation_response_obj.usage.prompt_tokens,
-                "completion_tokens": sql_generation_response_obj.usage.completion_tokens,
-                "total_tokens": sql_generation_response_obj.usage.total_tokens,
             }
             t2s_object["possible_sql"] = possible_sql
             # execute SQL
@@ -113,9 +106,6 @@ class Pipeline():
             t2s_object["candidate_sql_generation"] = {
                 "sql_generation_reasoning": "",
                 "possible_sql": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
             }
             t2s_object["candidate_sql_generation"]["error"] = f"{e}"
             return t2s_object
@@ -135,9 +125,6 @@ class Pipeline():
             t2s_object["question_enrichment"] = {
                 "enrichment_reasoning": q_enrich_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
                 "enriched_question": q_enrich_response_obj.choices[0].message.content['enriched_question'],
-                "prompt_tokens": q_enrich_response_obj.usage.prompt_tokens,
-                "completion_tokens": q_enrich_response_obj.usage.completion_tokens,
-                "total_tokens": q_enrich_response_obj.usage.total_tokens,
             }
             enriched_question = question + enrichment_reasoning + enriched_question # This is added after experiment-24
         except Exception as e:
@@ -145,9 +132,6 @@ class Pipeline():
             t2s_object["question_enrichment"] = {
                 "enrichment_reasoning": "",
                 "enriched_question": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
             }
             t2s_object["question_enrichment"]["error"] = f"{e}"
             enriched_question = question
@@ -165,9 +149,6 @@ class Pipeline():
             t2s_object["sql_refinement"] = {
                 "sql_generation_reasoning": sql_generation_response_obj.choices[0].message.content['chain_of_thought_reasoning'],
                 "predicted_sql": predicted_sql,
-                "prompt_tokens": sql_generation_response_obj.usage.prompt_tokens,
-                "completion_tokens": sql_generation_response_obj.usage.completion_tokens,
-                "total_tokens": sql_generation_response_obj.usage.total_tokens,
             }
             t2s_object["predicted_sql"] = predicted_sql
         except Exception as e:
@@ -175,19 +156,9 @@ class Pipeline():
             t2s_object["sql_refinement"] = {
                 "sql_generation_reasoning": "",
                 "predicted_sql": "",
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
             }
             t2s_object["sql_refinement"]["error"] = f"{e}"
             return t2s_object
-
-        # storing the usage for one question
-        t2s_object["total_usage"] = {
-            "prompt_tokens": t2s_object['candidate_sql_generation']['prompt_tokens'] + t2s_object['question_enrichment']['prompt_tokens'] + t2s_object['sql_refinement']['prompt_tokens'],
-            "completion_tokens": t2s_object['candidate_sql_generation']['completion_tokens'] + t2s_object['question_enrichment']['completion_tokens'] + t2s_object['sql_refinement']['completion_tokens'],
-            "total_tokens": t2s_object['candidate_sql_generation']['total_tokens'] + t2s_object['question_enrichment']['total_tokens'] + t2s_object['sql_refinement']['total_tokens']
-        }
 
         t2s_object_prediction = t2s_object
         return t2s_object_prediction
@@ -239,10 +210,6 @@ class Pipeline():
         """
         prompt = self.construct_question_enrichment_prompt(db_path=db_path, q_id=q_id, db_id=db_id, question=question, evidence=evidence, possible_conditions=possible_conditions, schema_dict=schema_dict, db_descriptions=db_descriptions)
         response_object = create_response(stage="question_enrichment", prompt=prompt, model=self.model, max_tokens=self.max_tokens, temperature=self.temperature, top_p=self.top_p, n=self.n)
-        try:
-            response_object = self.convert_message_content_to_dict(response_object)
-        except:
-            return response_object
 
         return response_object
     

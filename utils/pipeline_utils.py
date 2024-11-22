@@ -26,6 +26,7 @@ def create_response(stage: str, prompt: str, pipe: Pipeline) -> Dict:
     else:
         raise ValueError("Wrong value for stage. It can only take following values: question_enrichment, candidate_sql_generation, sql_refinement or schema_filtering.")
 
-    response_object = pipe(system_content + prompt)
+    messages = [{"role": "system", "content": system_content}, {"role": "user", "content": prompt}]
+    response_object = pipe(messages)
 
     return response_object
