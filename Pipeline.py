@@ -1,24 +1,24 @@
 import os
-from utils.prompt_utils import *
-from utils.db_utils import * 
-from utils.pipeline_utils import create_response
+from ExistingNL2SQL.ESQL.prompt_utils import *
+from ExistingNL2SQL.ESQL.db_utils import * 
+from ExistingNL2SQL.ESQL.pipeline_utils import create_response
 from typing import Dict
 
 class Pipeline():
     def __init__(self, transformers_pipe, db_path):
-
+        self.mode = "test"
         # Question Enrichment Arguments
         self.enrichment_level = "complex"
-        self.elsn = 3
+        self.elsn = 0 #3
         self.efsse = False
 
         # Schema Filtering Arguments
-        self.flsn = 3
+        self.flsn = 0 #3
         self.ffsse = False
 
         # SQL Generation Arguments
         self.cfg = True
-        self.glsn = 3
+        self.glsn = 0 #3
         self.gfsse = False
 
         # Database Sample Arguments
@@ -32,7 +32,7 @@ class Pipeline():
         self.seed = 42
 
         # Pipeline attribute
-        self.transformers_pipe = transformers_pipe
+        self.pipeline = transformers_pipe
 
     def forward_pipeline_SF_CSG_QE_SR(self, t2s_object: Dict) -> Dict:
         """
@@ -48,10 +48,8 @@ class Pipeline():
         evidence = t2s_object["evidence"]
         question = t2s_object["question"]
         
-        database_column_meaning_path = os.path.join(os.path.dirname("self.db_path"), "column_descriptions.json")
-        db_column_meanings = db_column_meaning_prep(database_column_meaning_path, db_id)
-        db_descriptions = db_descriptions + "\n\n" + db_column_meanings
-
+        database_column_meaning_path = os.path.join(os.path.dirname(self.db_path), "column_descriptions.json")
+        db_descriptions = db_column_meaning_prep(database_column_meaning_path, db_id)
         # extracting original schema dictionary 
         original_schema_dict = get_schema_tables_and_columns_dict(db_path=self.db_path)
 
@@ -181,9 +179,9 @@ class Pipeline():
         Returns:
             prompt (str): Question enrichment prompt
         """
-        enrichment_template_path = os.path.join(os.getcwd(), "prompt_templates/question_enrichment_prompt_template.txt")
+        enrichment_template_path = os.path.join(os.getcwd(), "ExistingNL2SQL/ESQL/prompt_templates/question_enrichment_prompt_template.txt")
         question_enrichment_prompt_template = extract_question_enrichment_prompt_template(enrichment_template_path)
-        few_shot_data_path = os.path.join(os.getcwd(), "few-shot-data/question_enrichment_few_shot_examples.json")
+        few_shot_data_path = "ExistingNL2SQL/ESQL/few-shot-data/question_enrichment_few_shot_examples.json"
         q_enrich_few_shot_examples = question_enrichment_few_shot_prep(few_shot_data_path, q_id=q_id, q_db_id=db_id, level_shot_number=self.elsn, schema_existance=self.efsse, enrichment_level=self.enrichment_level, mode=self.mode)
         db_samples = extract_db_samples_enriched_bm25(question, evidence, db_path=db_path, schema_dict=schema_dict, sample_limit=self.db_sample_limit)
         schema = generate_schema_from_schema_dict(db_path=db_path, schema_dict=schema_dict)
@@ -228,11 +226,11 @@ class Pipeline():
         Returns:
             prompt (str): prompt for SQL generation stage
         """
-        sql_generation_template_path =  os.path.join(os.getcwd(), "prompt_templates/candidate_sql_generation_prompt_template.txt")
+        sql_generation_template_path =  "ExistingNL2SQL/ESQL/prompt_templates/candidate_sql_generation_prompt_template.txt"
         with open(sql_generation_template_path, 'r') as f:
             sql_generation_template = f.read()
             
-        few_shot_data_path = os.path.join(os.getcwd(), "few-shot-data/question_enrichment_few_shot_examples.json")
+        few_shot_data_path = "ExistingNL2SQL/ESQL/few-shot-data/question_enrichment_few_shot_examples.json"
         sql_generation_few_shot_examples = sql_generation_and_refinement_few_shot_prep(few_shot_data_path, q_db_id=db_id, level_shot_number=self.glsn, schema_existance=self.gfsse, mode=self.mode)
         db_samples = extract_db_samples_enriched_bm25(question, evidence, db_path, schema_dict=filtered_schema_dict, sample_limit=self.db_sample_limit)
         filtered_schema = generate_schema_from_schema_dict(db_path=db_path, schema_dict=filtered_schema_dict)
@@ -258,11 +256,11 @@ class Pipeline():
         Returns:
             prompt (str): prompt for SQL generation stage
         """
-        sql_generation_template_path =  os.path.join(os.getcwd(), "prompt_templates/sql_refinement_prompt_template.txt")
+        sql_generation_template_path =  "ExistingNL2SQL/ESQL/prompt_templates/sql_refinement_prompt_template.txt"
         with open(sql_generation_template_path, 'r') as f:
             sql_generation_template = f.read()
             
-        few_shot_data_path = os.path.join(os.getcwd(), "few-shot-data/question_enrichment_few_shot_examples.json")
+        few_shot_data_path ="ExistingNL2SQL/ESQL/few-shot-data/question_enrichment_few_shot_examples.json"
         sql_generation_few_shot_examples = sql_generation_and_refinement_few_shot_prep(few_shot_data_path, q_db_id=db_id, level_shot_number=self.glsn, schema_existance=self.gfsse, mode=self.mode)
         possible_conditions_dict_list = collect_possible_conditions(db_path=db_path, sql=possible_sql)
         possible_conditions = sql_possible_conditions_prep(possible_conditions_dict_list=possible_conditions_dict_list)
@@ -286,11 +284,11 @@ class Pipeline():
         Returns:
             prompt (str): prompt for database schema filtering stage
         """
-        schema_filtering_prompt_template_path =  os.path.join(os.getcwd(), "prompt_templates/schema_filter_prompt_template.txt")
+        schema_filtering_prompt_template_path =  "ExistingNL2SQL/ESQL/prompt_templates/schema_filter_prompt_template.txt"
         with open(schema_filtering_prompt_template_path, 'r') as f:
             schema_filtering_template = f.read()
 
-        few_shot_data_path = os.path.join(os.getcwd(), "few-shot-data/question_enrichment_few_shot_examples.json")
+        few_shot_data_path = "ExistingNL2SQL/ESQL/few-shot-data/question_enrichment_few_shot_examples.json"
         schema_filtering_few_shot_examples = schema_filtering_few_shot_prep(few_shot_data_path, q_db_id=db_id, level_shot_number=self.elsn, schema_existance=self.efsse, mode=self.mode)
         db_samples = extract_db_samples_enriched_bm25(question, evidence, db_path=db_path, schema_dict=schema_dict, sample_limit=self.db_sample_limit)
         schema = generate_schema_from_schema_dict(db_path=db_path, schema_dict=schema_dict)

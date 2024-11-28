@@ -1,8 +1,8 @@
 import os
 import random
 import json
-from .db_utils import *
-from .retrieval_utils import *
+from ExistingNL2SQL.ESQL.db_utils import *
+from ExistingNL2SQL.ESQL.retrieval_utils import *
 from typing import Any, Union, List, Dict
 
 

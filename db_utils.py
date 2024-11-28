@@ -15,6 +15,7 @@ from sqlglot.expressions import Select
 from func_timeout import func_timeout, FunctionTimedOut
 from typing import Any, Union, List, Dict, Optional
 nltk.download('punkt')
+nltk.download('punkt_tab')
 
 def execute_sql(db_path: str, sql: str, fetch: Union[str, int] = "all") -> Any:
     """
